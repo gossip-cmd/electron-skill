@@ -1,60 +1,115 @@
 ---
 name: electron-development
-description: Electron 应用开发指导，重点覆盖安全 IPC、进程隔离、导航控制、软件更新、代码签名、打包发布与测试。用于设计、实现、审查和排查 Electron 项目。
+description: 基于 Electron 官方中文文档的开发指导 Skill。用于创建、设计、实现、审查、调试和发布 Electron 应用，覆盖应用架构、进程模型、窗口、IPC、协议、安全、性能、打包、分发、自动更新和测试。
 ---
 
 # Electron 开发指导 Skill
 
-## 目标
+本 Skill 以 [Electron 官方中文文档](https://www.electronjs.org/zh/docs/latest/) 为主要依据。处理 Electron 任务时，优先遵循官方 API、教程、安全建议和版本文档；如果项目 Electron 版本与文档最新版本不同，先确认项目版本，再查阅对应版本的 API 变化和弃用项。
 
-本 Skill 用于指导 Electron 应用的设计、开发、安全审查、更新机制、打包发布和故障排查。优先选择安全默认值，避免为了快速实现功能而扩大渲染进程权限。
+## 使用方式
 
-## 开发原则
+当用户要求创建或修改 Electron 应用时：
 
-1. 明确区分 Main、Preload 和 Renderer 三类代码。
-2. Renderer 默认视为不可信环境，不能直接访问 Node.js 或 Electron 高权限 API。
-3. 只通过类型化、最小权限的 Preload API 跨进程通信。
-4. 所有来自 Renderer 的数据都必须在 Main 进程重新校验。
-5. 生产环境必须考虑导航控制、CSP、代码签名、更新完整性和回滚策略。
-6. 不因为测试方便而关闭 `contextIsolation`、`sandbox` 或安全校验。
+1. 识别 Electron 版本、Node.js 版本、操作系统和打包工具。
+2. 明确需求属于 Main、Preload、Renderer、Utility Process 还是构建发布流程。
+3. 先设计权限边界，再实现功能；Renderer 默认视为不可信环境。
+4. 优先使用官方 API 和安全默认值，不为了绕过错误而关闭安全选项。
+5. 对 IPC、文件路径、URL、协议、外部进程和更新包做输入校验。
+6. 在开发环境和打包后的生产环境分别验证路径、协议、资源和权限。
+7. 说明所依据的官方文档章节，并对版本敏感的配置标注版本范围。
 
-## 推荐架构
+## 官方文档导航
+
+- 入门教程：https://www.electronjs.org/zh/docs/latest/tutorial/tutorial-prerequisites
+- 应用架构：https://www.electronjs.org/zh/docs/latest/tutorial/process-model
+- 进程间通信：https://www.electronjs.org/zh/docs/latest/tutorial/ipc
+- Context Isolation：https://www.electronjs.org/zh/docs/latest/tutorial/context-isolation
+- 进程沙盒化：https://www.electronjs.org/zh/docs/latest/tutorial/sandbox
+- 安全清单：https://www.electronjs.org/zh/docs/latest/tutorial/security
+- 应用打包：https://www.electronjs.org/zh/docs/latest/tutorial/application-distribution
+- 自动更新：https://www.electronjs.org/zh/docs/latest/tutorial/updates
+- API 文档：https://www.electronjs.org/zh/docs/latest/api/app
+- Electron Releases：https://releases.electronjs.org/
+
+## 应用架构
+
+### 进程模型
+
+- **Main Process**：每个应用只有一个，负责生命周期、窗口、菜单、托盘、原生系统 API 和权限较高的操作。
+- **Renderer Process**：每个 `WebContents` 通常对应一个，负责 UI；不要赋予其不必要的 Node.js 或 Electron 权限。
+- **Preload Script**：在 Renderer 页面加载前运行，用于提供经过限制的桥接 API。
+- **Utility Process**：适用于与 UI 无关、需要隔离或计算密集型的任务；不要把所有工作都堆到 Main Process。
+
+推荐结构：
 
 ```text
 src/
 ├── main/
-│   ├── index.ts          # 应用生命周期和窗口创建
-│   ├── ipc/              # 集中式 IPC 注册层
-│   └── security/         # URL、来源和输入校验
+│   ├── index.ts
+│   ├── windows.ts
+│   ├── ipc/
+│   │   ├── index.ts
+│   │   └── handlers/
+│   └── security/
 ├── preload/
-│   ├── index.ts          # 最小化 contextBridge API
-│   └── types.ts           # Window API 类型声明
+│   ├── index.ts
+│   └── types.ts
 └── renderer/
-    └── ...                # UI 和业务展示逻辑
+    ├── index.html
+    └── src/
 ```
 
-## 安全
+主进程负责创建窗口并等待 `app.whenReady()`；不要在 `app` ready 前调用依赖 Chromium 或原生资源的 API。处理 `window-all-closed`、`activate` 和平台差异时，遵循官方生命周期示例。
 
-### 1. IPC 通信机制
+## 窗口和 WebContents
+
+创建窗口时使用安全默认值：
+
+```ts
+const window = new BrowserWindow({
+  webPreferences: {
+    preload: path.join(__dirname, '../preload/index.js'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true
+  }
+})
+```
+
+要求：
+
+- `contextIsolation: true` 必须保持启用。
+- `nodeIntegration: false` 必须保持禁用。
+- 优先启用 `sandbox: true`；如确有兼容性原因，必须记录原因、影响和替代方案。
+- 生产环境使用受信任的本地入口或自定义协议，不要无约束地加载远程页面。
+- 使用 `webContents` 的 `will-navigate` 和 `setWindowOpenHandler` 控制导航和新窗口。
+- 不要把 `webContents`、`BrowserWindow` 或 Electron 事件对象暴露给 Renderer。
+- 不要用 `webSecurity: false`、`allowRunningInsecureContent: true` 等选项掩盖资源或跨域问题。
+
+## IPC 和 Preload
+
+### 设计规则
 
 **允许：**
 
-- 使用 `contextBridge.exposeInMainWorld` 暴露最小化、目的单一的 API 方法。
-- 通过 `ipcRenderer.invoke` 进行异步请求/响应通信。
-- 在 Preload 中包装回调，避免将 `event` 参数暴露给 Renderer。
-- 在 `ipcMain.handle` / `ipcMain.on` 中验证 `event.sender` 或 `event.senderFrame` 的来源。
-- 使用集中式 IPC 注册层，禁止在业务代码中散落 `ipcMain.handle` 调用。
-- 所有 Renderer 代码通过类型化的 `window.electronAPI` 访问 IPC。
+- 使用 `contextBridge.exposeInMainWorld` 暴露最小化、目的单一、类型明确的 API。
+- 使用 `ipcRenderer.invoke` 与 `ipcMain.handle` 完成异步请求/响应。
+- 在 Preload 中包装回调，只向 Renderer 传递业务数据，不传递 `event`。
+- 在 Main 的集中式 IPC 注册层注册处理器，避免业务模块散落 `ipcMain.handle`。
+- 在每个处理器中验证 `event.sender` 或 `event.senderFrame` 的来源。
+- 在 Main 中对所有来自 Renderer 的参数重新做类型、范围和权限验证。
 
 **禁止：**
 
-- 将完整的 `ipcRenderer` 对象或通用的 `send` / `on` 方法暴露给 Renderer。
-- 直接将 `event` 参数传递给 Renderer 回调。
-- 暴露无限制的 `shell.openExternal`，而不校验 scheme 和目标地址。
-- 在 IPC 处理器中信任未经校验的文件路径、URL 或其他输入。
-- 在 `src/**` 的 Renderer 代码中直接 `import { ipcRenderer } from 'electron'`。
+- 将完整的 `ipcRenderer` 暴露给 Renderer。
+- 暴露通用的 `send`、`on`、`once` 或任意 channel API。
+- 在 Renderer 中直接 `import { ipcRenderer } from 'electron'`。
+- 将 `event`、`sender`、`webContents` 等对象传给 Renderer。
+- 使用 `sendSync` 作为常规通信方式。
+- 信任未经校验的文件路径、命令参数、URL 或序列化数据。
 
-### 2. 推荐 IPC 模式
+示例：
 
 ```ts
 // preload/index.ts
@@ -62,205 +117,186 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
-  openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url)
+  chooseFile: () => ipcRenderer.invoke('dialog:choose-file')
 })
 ```
 
 ```ts
 // main/ipc/index.ts
-import { app, ipcMain, shell } from 'electron'
-
-const ALLOWED_EXTERNAL_SCHEMES = new Set(['https:', 'mailto:'])
+import { app, ipcMain } from 'electron'
 
 export function registerIpcHandlers() {
   ipcMain.handle('app:get-version', (event) => {
     assertTrustedFrame(event.senderFrame)
     return app.getVersion()
   })
-
-  ipcMain.handle('shell:open-external', async (event, rawUrl: unknown) => {
-    assertTrustedFrame(event.senderFrame)
-    if (typeof rawUrl !== 'string') throw new TypeError('Invalid URL')
-
-    const url = new URL(rawUrl)
-    if (!ALLOWED_EXTERNAL_SCHEMES.has(url.protocol)) {
-      throw new Error('External URL scheme is not allowed')
-    }
-
-    await shell.openExternal(url.toString())
-  })
 }
 
 function assertTrustedFrame(frame: Electron.WebFrameMain | undefined) {
-  if (!frame || !frame.url.startsWith('app://')) {
+  if (!frame || !isTrustedAppUrl(frame.url)) {
     throw new Error('Untrusted IPC sender')
   }
 }
-```
 
-实际项目中应将 `app://` 替换为应用真实的受信任来源，并在应用启动时只调用一次 `registerIpcHandlers()`。
-
-### 3. WebPreferences
-
-创建 `BrowserWindow` 时保持以下配置：
-
-```ts
-webPreferences: {
-  preload: path.join(__dirname, '../preload/index.js'),
-  contextIsolation: true,
-  nodeIntegration: false,
-  sandbox: true
+function isTrustedAppUrl(rawUrl: string) {
+  const url = new URL(rawUrl)
+  return url.protocol === 'app:' && url.hostname === 'local'
 }
 ```
 
-**禁止：**
+实际项目中应为 `window.electronAPI` 编写 TypeScript 全局类型声明。IPC channel 名称应采用功能域命名，例如 `settings:load`、`files:read`，而不是暴露任意调用能力。
 
-- 开启 `nodeIntegration: true`。
-- 关闭 `contextIsolation`。
-- 生产环境加载远程内容却没有严格 CSP 和导航限制。
+## 数据、文件和外部链接
 
-对 `will-navigate`、`setWindowOpenHandler` 和必要时的 `webContents` 新窗口事件进行拦截，只允许受信任的应用来源。外部链接必须经过 scheme、域名和目标地址校验。
+- IPC 只传递可序列化的数据：字符串、数字、布尔值、`null`、数组和普通对象。
+- 不要发送函数、Promise、Symbol、WeakMap、WeakSet 或未经设计的 DOM 对象。
+- 文件操作必须限制根目录，使用 `path.resolve` 后检查结果是否仍位于允许目录内，防止路径穿越。
+- 不允许把 Renderer 提供的字符串直接作为 shell 命令执行。
+- 外部链接必须使用 `URL` 解析，并限制允许的 scheme；通常只允许 `https:`，其他 scheme 必须有明确业务理由。
+- 对文件选择、导入、导出和拖放内容进行大小、类型、路径和权限校验。
 
-### 4. IPC 数据序列化
+安全外链示例：
 
-**允许：** JSON 可序列化的对象、数组、字符串、数字、布尔值和 `null`。
-
-**禁止：**
-
-- DOM 对象，例如 `ImageBitmap`、`File`、`DOMMatrix`。
-- 函数、Promise、Symbol、WeakMap、WeakSet。
-- 将 `sendSync` 作为常规通信方式，因为它会阻塞 Renderer。
-
-### 5. 内容安全策略
-
-生产环境设置严格 CSP，至少限制脚本来源，不使用不必要的 `unsafe-eval`。不要把 CSP 当作唯一防线，仍需保持上下文隔离、来源校验和输入校验。
-
-## 软件更新机制
-
-### 1. 平台策略
-
-- macOS 和 Windows 使用 Electron `autoUpdater` 或 `electron-updater`。
-- Linux 使用发行版包管理器、Snap 或 Flatpak；不要依赖 Electron 内置 `autoUpdater`。
-- 使用 `electron-builder` 时，优先采用其签名、发布和更新生态。
-
-### 2. 更新源和签名
-
-**允许：**
-
-- 使用 HTTPS 分发更新。
-- 对更新包进行代码签名，并在安装前验证签名。
-- Windows 保持 `win.verifyUpdateCodeSignature: true`，并正确配置 `publisherName`。
-- 对更新清单（如 `latest.yml`）做独立签名，防止降级攻击。
-- 使用 Ed25519 或同等强度的数字签名保护发布元数据。
-- macOS 更新前完成代码签名和公证。
-
-**禁止：**
-
-- 通过 HTTP 分发更新而不做签名验证。
-- 只验证二进制签名而忽略更新清单完整性。
-- 在生产环境发布未签名应用。
-- 禁用 ASAR 完整性校验。
-
-### 3. 更新生命周期
-
-监听并记录以下事件：
-
-- `checking-for-update`
-- `update-available`
-- `update-not-available`
-- `download-progress`
-- `update-downloaded`
-- `error`
-
-下载完成后向用户提供“立即重启安装”和“稍后安装”选项，并处理长期不重启的情况：
-
-- 支持空闲安装，例如用户 15 分钟无操作后安装。
-- 设置最大更新年龄，例如超过 30 天后强制提示或重启。
-- 支持经过密码学验证的降级和回滚。
-- 在 Squirrel.Windows 的 `--squirrel-firstrun` 阶段不要立即检查更新。
-
-### 4. electron-builder 更新配置
-
-保持安全配置，不使用未经验证的 Web Installer 载荷：
-
-```yaml
-build:
-  asar: true
-  asarUnpack: []
-  electronUpdaterCompatibility: '>=2.16'
-  nsis:
-    oneClick: false
-    perMachine: false
-    # 按当前 electron-builder 版本确认 disableWebInstaller 的配置位置和默认值
-  win:
-    verifyUpdateCodeSignature: true
-  linux:
-    # 发布渠道必须提供可验证的签名包
-    target:
-      - AppImage
+```ts
+const allowedSchemes = new Set(['https:', 'mailto:'])
+const url = new URL(rawUrl)
+if (!allowedSchemes.has(url.protocol)) {
+  throw new Error('URL scheme is not allowed')
+}
+await shell.openExternal(url.toString())
 ```
 
-对于 electron-builder v27/v28 及以上版本，发布前必须核对当前版本的 `disableWebInstaller`、`allowUnverifiedLinuxPackages` 和更新元数据要求；不要复制旧版本配置而忽略版本兼容性。若配置项在当前版本已默认安全，也不要为了绕过错误而显式关闭安全校验。
+## 安全基线
 
-## 代码签名与完整性
+遵循官方安全清单：
 
-- macOS：配置 Developer ID、签名、Hardened Runtime 和公证。
-- Windows：配置 Authenticode 证书、`publisherName`，并验证证书轮换策略。
-- 打包时启用 ASAR；除非有明确且审查过的原生模块需求，不要随意解包资源。
-- 使用 Electron Fuses 禁用不需要的危险能力，例如 `runAsNode`。
-- CI 中保护签名私钥和发布凭据，禁止写入仓库或构建日志。
-- 在发布前验证安装包、更新包、清单和签名，而不仅是构建是否成功。
+- 保持 `contextIsolation`、沙盒和禁用 Node 集成。
+- 使用严格 Content Security Policy，避免不必要的 `unsafe-eval` 和 `unsafe-inline`。
+- 限制导航、弹窗、协议和外部内容来源。
+- 不加载不受信任的远程内容；必须加载时，单独隔离并重新评估权限。
+- 不使用过时或危险的远程模块模式。
+- 不禁用 Chromium web security。
+- 不在日志、更新配置或仓库中写入 token、私钥和签名凭据。
+- 依赖升级后重新检查 Electron 安全公告、弃用 API 和打包工具兼容���。
 
-## 实施工作流
+## 菜单、托盘、快捷键和系统能力
 
-1. 确认 Electron、Node.js、electron-builder/electron-updater 的版本。
-2. 画出 Main、Preload、Renderer 的权限边界。
-3. 先配置安全的 `webPreferences` 和导航拦截。
-4. 为每个功能设计单一用途、类型化的 IPC API。
-5. 在集中式 IPC 层注册处理器，并验证发送方和参数。
-6. 为文件路径、URL、命令参数设置允许范围，拒绝路径穿越和危险 scheme。
-7. 配置 CSP、ASAR、代码签名和更新源。
-8. 测试开发环境、打包环境、安装、升级、回滚和卸载流程。
-9. 在 Windows、macOS、Linux 上验证平台差异。
-10. 审查日志中是否泄露令牌、路径、签名私钥或用户隐私。
+系统能力必须留在 Main Process，通过 Preload 暴露单一用途接口：
 
-## 审查清单
+- 菜单和上下文菜单使用 `Menu`、`MenuItem`。
+- 托盘使用 `Tray`，注意 Windows、macOS 和 Linux 的生命周期差异。
+- 全局快捷键使用 `globalShortcut`，应用退出时释放注册项。
+- 通知使用 `Notification`，不要把用户输入未经处理地拼入系统命令。
+- 文件对话框使用 `dialog`，返回给 Renderer 的是经过筛选的路径或业务数据。
+- 使用 `shell` 时严格限制 `openExternal`、`openPath` 等高权限操作。
+
+## 存储和数据库
+
+根据数据类型选择存储位置：
+
+- 用户配置、日志和本地数据使用 `app.getPath('userData')` 下的应用目录。
+- 不要把可变数据写入安装目录或 ASAR 包内。
+- 敏感凭据优先使用操作系统凭据存储，而不是明文 JSON 或 localStorage。
+- SQLite、原生模块和文件数据库应在 Main 或 Utility Process 中访问，通过窄 IPC API 提供能力。
+- 对数据库迁移、锁、并发访问、备份和损坏恢复进行设计。
+
+## 性能和稳定性
+
+- 避免在 Main Process 执行长时间同步任务。
+- CPU 密集型任务使用 Worker、Utility Process 或异步 API。
+- 避免频繁创建窗口和无界监听器，窗口销毁时移除监听器。
+- 对 IPC、文件、网络和更新操作设置超时、取消和错误处理。
+- 通过 DevTools、Chromium 性能工具和主进程日志定位内存、CPU、启动和渲染问题。
+- 生产日志应分级、可脱敏，并避免记录用户隐私和凭据。
+
+## 打包、分发和代码签名
+
+Electron 本身不规定唯一打包工具，可根据项目选择 Electron Forge、electron-builder 或其他成熟方案。无论工具如何选择：
+
+- 固定 Electron、Node.js 和打包工具版本。
+- 启用 ASAR；原生模块只有在有明确理由时才配置解包。
+- macOS 使用 Developer ID 签名、公证和 Hardened Runtime。
+- Windows 使用 Authenticode 签名，并正确配置发布者名称和证书轮换。
+- Linux 使用发行版、Snap、Flatpak 或项目选择的签名发布渠道。
+- CI 中通过密钥管理服务保护签名私钥和发布凭据。
+- 在真实平台验证安装、启动、卸载、升级、权限、协议注册和崩溃恢复。
+- 使用 Electron Fuses 禁用不需要的危险能力，例如 `runAsNode`；配置前确认所用 Electron 和打包工具版本支持情况。
+
+## 自动更新
+
+- macOS、Windows 可使用 Electron `autoUpdater`；也可以使用 `electron-updater` 获得更完整的发布控制。
+- Linux 不依赖 Electron 内置 `autoUpdater`，使用发行版包管理器、Snap 或 Flatpak 的更新机制。
+- 更新源必须使用 HTTPS，并对安装包、元数据和签名进行验证。
+- Windows 保持更新代码签名验证，配置与签名证书匹配的发布者名称。
+- 监听 `checking-for-update`、`update-available`、`update-not-available`、`download-progress`、`update-downloaded` 和 `error`。
+- `update-downloaded` 后提供立即安装和稍后安装；处理长期不重启、强制更新年龄、回滚和降级策略。
+- Squirrel.Windows 首次运行阶段存在 `--squirrel-firstrun` 时，不要立即检查更新。
+- 发布前核对当前 `electron-builder` / `electron-updater` 版本的元数据格式、Web Installer、安全校验和 Linux 包验证选项，不要照搬旧版本配置。
+
+## 测试策略
+
+至少覆盖：
+
+- Main 生命周期和窗口创建。
+- Preload API 类型和暴露面。
+- IPC 成功、失败、超时、来源伪造和参数校验。
+- 文件路径穿越、危险 URL scheme 和恶意输入。
+- Renderer 组件和用户流程。
+- 打包后资源路径、ASAR、原生模块和协议。
+- Windows、macOS、Linux 的安装、升级、卸载和签名。
+- 自动更新失败、断网、下载中断、版本回滚和用户延迟安装。
+
+## 代码审查清单
+
+### 架构
+
+- [ ] Main、Preload、Renderer 的职责和权限边界清晰。
+- [ ] 长任务没有阻塞 Main 或 Renderer。
+- [ ] 生产资源路径不依赖开发服务器假设。
 
 ### IPC
 
 - [ ] Renderer 没有直接导入 `ipcRenderer`。
-- [ ] Preload 只暴露最小 API，没有通用 `send` / `on`。
-- [ ] 每个 handler 都验证发送方来源。
-- [ ] 每个外部输入都做类型、范围和权限校验。
-- [ ] 没有把 Electron `event` 对象传给 Renderer。
+- [ ] Preload 只暴露最小化、类型化 API。
+- [ ] 所有 handler 验证来源和输入。
+- [ ] 没有把 Electron event 或通用 IPC 能力传给 Renderer。
+- [ ] IPC 数据可序列化且有错误处理。
 
-### 窗口和导航
+### 安全
 
 - [ ] `contextIsolation: true`。
 - [ ] `nodeIntegration: false`。
-- [ ] `sandbox: true`，除非有记录充分的兼容性理由。
-- [ ] 已拦截未知导航和新窗口。
-- [ ] 外部 URL 使用 HTTPS 或明确允许的 scheme。
-- [ ] 生产环境 CSP 严格且没有不必要的 `unsafe-*`。
+- [ ] `sandbox: true` 或记录了明确例外。
+- [ ] 导航、新窗口、外部 URL 和协议受到限制。
+- [ ] CSP 严格，没有不必要的 `unsafe-*`。
+- [ ] 文件路径、命令参数、更新包和凭据均有校验或保护。
 
-### 更新和发布
+### 发布
 
-- [ ] 更新通过 HTTPS 获取。
-- [ ] 更新包和清单都经过完整性验证。
-- [ ] Windows 验证 `publisherName` 和证书。
-- [ ] macOS 已签名并公证。
-- [ ] Linux 使用发行版支持的签名包或更新机制。
-- [ ] 处理 `update-downloaded` 后长期不重启。
-- [ ] 已验证回滚、降级和版本年龄策略。
-- [ ] 未禁用 ASAR 完整性校验或更新安全开关。
+- [ ] ASAR、代码签名和公证按目标平台配置。
+- [ ] 更新源使用 HTTPS，更新包和元数据可验证。
+- [ ] 已测试安装、升级、卸载、回滚和断网场景。
+- [ ] CI 凭据没有进入仓库和构建日志。
 
 ## 排错顺序
 
-1. 确认问题发生在 Main、Preload 还是 Renderer。
-2. 检查打包后 Preload 路径和实际文件是否存在。
-3. 检查 IPC channel 名称、参数类型和注册时机。
-4. 检查 `event.senderFrame.url` 是否为预期来源。
-5. 检查开发环境 URL 与生产环境自定义协议是否不同。
-6. 检查签名证书、发布清单、HTTPS 和更新渠道。
-7. 检查系统平台、安装格式和 Electron/electron-builder 版本差异。
-8. 不要通过关闭安全配置来“修复”问题；应定位真正的来源、权限或兼容性原因。
+1. 确认 Electron、Node.js、打包工具和目标平台版本。
+2. 判断问题位于 Main、Preload、Renderer、Utility Process 还是安装/更新阶段。
+3. 检查打包后的 Preload 路径、资源路径和 ASAR 内容。
+4. 检查 IPC channel、注册时机、参数类型和发送方 URL。
+5. 检查开发服务器 URL 与生产自定义协议的差异。
+6. 检查导航、CSP、沙盒、原生模块和平台权限。
+7. 更新问题检查 HTTPS、清单、签名、证书、发布者名称和安装格式。
+8. 对照当前 Electron 官方中文文档和版本变更记录确认 API 行为。
+9. 不通过关闭安全配置来“修复”问题；修复真实的来源、权限、路径或兼容性问题。
+
+## 版本说明
+
+Electron API、默认安全配置、自动更新元数据和 electron-builder 选项会随版本变化。实施前必须核对：
+
+- 项目 `package.json` 中的 Electron 版本。
+- 官方文档中的对应 API 和弃用说明。
+- 目标平台的签名、公证和分发要求。
+- `electron-builder`、`electron-updater`、Electron Forge 等工具的当前版本文档。
+
+本文档不是 Electron API 的替代品；遇到 API 细节、行为变化或安全决策时，以官方文档和官方安全建议为准。
